@@ -1,4 +1,5 @@
-python-telegram-bot==21.3
+httpx==0.24.1
+python-telegram-bot[http2]==20.7
 anthropic
 schedule
 pytz

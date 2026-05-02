@@ -256,6 +256,29 @@ def handle_updates():
                         tg_send_message(chat_id, welcome)
                         logger.info("Yangi a'zo kutib olindi: %s", name)
 
+                # Yangi a'zo (new_chat_members orqali)
+                message_raw = update.get("message", {})
+                new_members = message_raw.get("new_chat_members", [])
+                if new_members:
+                    chat_id = message_raw["chat"]["id"]
+                    for user in new_members:
+                        if user.get("is_bot"):
+                            continue
+                        name = f"@{user['username']}" if user.get("username") else user.get("first_name", "")
+                        welcome = (
+                            f"Xush kelibsiz, {name}!\n\n"
+                            f"Bu TezWeb.uz rasmiy muhokama guruhimiz.\n\n"
+                            f"Bu yerda siz:\n"
+                            f"- Sayt va bot yaratish haqida savol bera olasiz\n"
+                            f"- Biznes va IT yangiliklar muhokama qila olasiz\n"
+                            f"- Mutaxassislarimizdan maslahat ola olasiz\n\n"
+                            f"Kanalimizga obuna buling: @tezweb_uz\n"
+                            f"Saytimiz: tezweb.uz\n"
+                            f"Buyurtma: @Shohdollar22"
+                        )
+                        tg_send_message(chat_id, welcome)
+                        logger.info("Yangi azu kutib olindi: %s", name)
+
                 # Guruhda xabar
                 message = update.get("message", {})
                 if message and message.get("text"):
@@ -328,3 +351,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

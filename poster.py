@@ -284,9 +284,7 @@ def handle_updates():
                 if message and message.get("text"):
                     text     = message["text"]
                     chat     = message.get("chat", {})
-                    chat_type = chat.get("type", "")
-                    if chat_type not in ("group", "supergroup"):
-                        continue
+                    # Barcha guruhlar uchun ishlaydi
 
                     from_user = message.get("from", {})
                     user_name = from_user.get("username", from_user.get("first_name", "user"))
@@ -351,4 +349,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

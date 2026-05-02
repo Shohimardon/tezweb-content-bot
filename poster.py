@@ -276,8 +276,8 @@ def handle_updates():
                             f"Saytimiz: tezweb.uz\n"
                             f"Buyurtma: @Shohdollar22"
                         )
-                        tg_send_message(chat_id, welcome)
-                        logger.info("Yangi azu kutib olindi: %s", name)
+                        result = tg_send_message(chat_id, welcome)
+                        logger.info("Yangi azu kutib olindi: %s | chat_id: %s | result: %s", name, chat_id, result)
 
                 # Guruhda xabar
                 message = update.get("message", {})

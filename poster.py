@@ -41,13 +41,12 @@ logger = logging.getLogger(__name__)
 # Telegram API funksiyalari
 # ──────────────────────────────────────────────
 
-def tg_send_message(chat_id, text):
+def tg_send_message(chat_id, text, parse_mode="Markdown"):
     try:
-        r = requests.post(f"{API}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
-        }, timeout=30)
+        payload = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        r = requests.post(f"{API}/sendMessage", json=payload, timeout=30)
         return r.json()
     except Exception as e:
         logger.error("sendMessage xatosi: %s", e)
@@ -272,11 +271,11 @@ def handle_updates():
                             f"- Sayt va bot yaratish haqida savol bera olasiz\n"
                             f"- Biznes va IT yangiliklar muhokama qila olasiz\n"
                             f"- Mutaxassislarimizdan maslahat ola olasiz\n\n"
-                            f"Kanalimizga obuna buling: @tezweb_uz\n"
+                            f"Kanalimizga obuna boling: @tezweb_uz\n"
                             f"Saytimiz: tezweb.uz\n"
                             f"Buyurtma: @Shohdollar22"
                         )
-                        result = tg_send_message(chat_id, welcome)
+                        result = tg_send_message(chat_id, welcome, parse_mode=None)
                         logger.info("Yangi azu kutib olindi: %s | chat_id: %s | result: %s", name, chat_id, result)
 
                 # Guruhda xabar

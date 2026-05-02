@@ -1,29 +1,20 @@
 """
 TezWeb.uz — AI Content Bot
-===========================
-1. Har kuni 3 marta kaналга post yuboradi
-2. Guruhda yangi a'zolarni kutib oladi
-3. Guruhda savollarga AI orqali javob beradi
+Telegram API ga to'g'ridan-to'g'ri requests orqali murojaat qiladi.
 """
 
-import asyncio
+import json
 import logging
 import os
 import schedule
 import time
 import pytz
+import requests
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import anthropic
-from telegram import Update, ChatMember
-from telegram.ext import (
-    Application,
-    MessageHandler,
-    ChatMemberHandler,
-    ContextTypes,
-    filters,
-)
 
 # ──────────────────────────────────────────────
 # Sozlamalar
@@ -36,12 +27,65 @@ GROUP         = "@tezweb_uz_chat"
 TASHKENT_TZ   = pytz.timezone("Asia/Tashkent")
 IMAGES_DIR    = Path("images")
 TOPIC_FILE    = "topic_index.txt"
+OFFSET_FILE   = "offset.txt"
+
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────
+# Telegram API funksiyalari
+# ──────────────────────────────────────────────
+
+def tg_send_message(chat_id, text):
+    try:
+        r = requests.post(f"{API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown"
+        }, timeout=30)
+        return r.json()
+    except Exception as e:
+        logger.error("sendMessage xatosi: %s", e)
+        return None
+
+def tg_send_photo(chat_id, photo_path, caption):
+    try:
+        with open(photo_path, "rb") as f:
+            r = requests.post(f"{API}/sendPhoto", data={
+                "chat_id": chat_id,
+                "caption": caption,
+                "parse_mode": "Markdown"
+            }, files={"photo": f}, timeout=60)
+        return r.json()
+    except Exception as e:
+        logger.error("sendPhoto xatosi: %s", e)
+        return None
+
+def tg_get_updates(offset=0):
+    try:
+        r = requests.get(f"{API}/getUpdates", params={
+            "offset": offset,
+            "timeout": 30,
+            "allowed_updates": ["message", "chat_member"]
+        }, timeout=40)
+        return r.json()
+    except Exception as e:
+        logger.error("getUpdates xatosi: %s", e)
+        return {"ok": False, "result": []}
+
+def tg_send_chat_action(chat_id, action="typing"):
+    try:
+        requests.post(f"{API}/sendChatAction", json={
+            "chat_id": chat_id,
+            "action": action
+        }, timeout=10)
+    except Exception:
+        pass
 
 # ──────────────────────────────────────────────
 # Mavzular
@@ -70,11 +114,7 @@ TOPICS = [
     ("Mijoz ishonchini oshiruvchi sayt elementlari",      "card_20_Mijoz_Ishonchi.png"),
 ]
 
-# ──────────────────────────────────────────────
-# Navbatdagi mavzu
-# ──────────────────────────────────────────────
-
-def get_next_topic() -> tuple:
+def get_next_topic():
     if Path(TOPIC_FILE).exists():
         idx = int(Path(TOPIC_FILE).read_text().strip() or "0")
     else:
@@ -87,18 +127,20 @@ def get_next_topic() -> tuple:
 # AI post yaratish
 # ──────────────────────────────────────────────
 
-def generate_post(topic: str) -> str:
+def generate_post(topic):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     hours  = datetime.now(TASHKENT_TZ).hour
-
     if hours < 12:
-        greeting = "Xayrli tong!"
+        vaqt = "ertalab"
     elif hours < 17:
-        greeting = "Xayrli kun!"
+        vaqt = "kunduz"
     else:
-        greeting = "Xayrli kech!"
+        vaqt = "kechqurun"
 
-    prompt = f"""Sen TezWeb.uz kompaniyasining Telegram kanal menejerisisan.
+    msg = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1000,
+        messages=[{"role": "user", "content": f"""Sen TezWeb.uz kompaniyasining Telegram kanal menejerisisan.
 TezWeb.uz — Uzbekistonda tez yuklanadigan saytlar, Telegram botlar va reklama xizmatlarini taqdim etuvchi IT kompaniya.
 
 Mavzu: {topic}
@@ -106,218 +148,185 @@ Mavzu: {topic}
 Talablar:
 - Til: O'zbek tili (lotin alifbosi)
 - Uzunlik: 150-250 so'z
-- "{greeting}" bilan emas, qiziqarli fakt yoki savol bilan boshlang
+- Qiziqarli fakt yoki savol bilan boshlang
 - Qisqa paragraflar, emojilar ishlatilsin
 - Oxirida TezWeb.uz ni tabiiy tarzda tavsiya qil
-- Eng oxirgi qator aynan shu bo'lsin: "🔗 tezweb.uz | 📢 @tezweb_uz | 📩 @Shohdollar22"
-- Faqat post matnini yoz"""
-
-    msg = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}]
+- Eng oxirgi qator: "tezweb.uz | @tezweb_uz | @Shohdollar22"
+- Faqat post matnini yoz"""}]
     )
     return msg.content[0].text
 
 
-def generate_reply(question: str, username: str) -> str:
-    """Guruh savoliga AI javobi."""
+def generate_reply(question, username):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-    prompt = f"""Sen TezWeb.uz kompaniyasining aqlli yordamchisisisan.
-TezWeb.uz — Uzbekistonda tez yuklanadigan saytlar, Telegram botlar va reklama xizmatlarini taqdim etuvchi IT kompaniya.
-
-Xizmatlar va narxlar:
-- Minimal sayt (lendos): 5 000 000 so'mdan
-- Tezkor sayt (biznes): 8 000 000 so'mdan
-- Sayt + reklama to'plami: 18 000 000 so'mdan
-- To'liq to'plam: 24 000 000 so'mdan
-- Boshlang'ich bot: 6 000 000 so'mdan
-- Biznes bot: 14 000 000 so'mdan
-- AI bot: 22 000 000 so'mdan
-- Reklama (Direkt/Ads): 4 000 000 so'm/oy dan
-
-Foydalanuvchi @{username} quyidagi savol berdi:
-"{question}"
-
-Qoidalar:
-- Faqat sayt, bot, IT, biznes, reklama, marketing mavzularida javob ber
-- Boshqa mavzularda: "Kechirasiz, men faqat IT va biznes mavzularida yordam bera olaman 😊"
-- Javob qisqa va aniq bo'lsin (max 150 so'z)
-- O'zbek tilida javob ber
-- Agar narx so'rasa — narxlarni ayt va @Shohdollar22 ga murojaat qilishni tavsiya et
-- Har doim do'stona va professional bo'l
-- Oxirida har doim: "📩 Batafsil: @Shohdollar22" qo'sh"""
-
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=500,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": f"""Sen TezWeb.uz kompaniyasining aqlli yordamchisisisan.
+TezWeb.uz xizmatlari va narxlari:
+- Minimal sayt: 5 000 000 so'mdan
+- Biznes sayt: 8 000 000 so'mdan
+- Sayt + reklama: 18 000 000 so'mdan
+- Boshlangich bot: 6 000 000 so'mdan
+- Biznes bot: 14 000 000 so'mdan
+- AI bot: 22 000 000 so'mdan
+- Reklama (Direkt/Ads): 4 000 000 so'm/oydan
+
+Foydalanuvchi @{username} savol berdi: "{question}"
+
+Qoidalar:
+- Faqat sayt, bot, IT, biznes, reklama mavzularida javob ber
+- Boshqa mavzularda: "Kechirasiz, men faqat IT va biznes mavzularida yordam bera olaman"
+- Javob qisqa va aniq (max 150 so'z), o'zbek tilida
+- Oxirida: "Batafsil: @Shohdollar22"
+- Faqat javob matnini yoz"""}]
     )
     return msg.content[0].text
 
 # ──────────────────────────────────────────────
-# Kanalga post yuborish
+# Post yuborish
 # ──────────────────────────────────────────────
 
-async def send_post_async(bot):
+def send_post():
     topic, image_file = get_next_topic()
     image_path = IMAGES_DIR / image_file
     logger.info("Post yaratilmoqda: %s", topic)
 
     try:
         caption = generate_post(topic)
-
         if image_path.exists():
-            with open(image_path, "rb") as photo:
-                await bot.send_photo(
-                    chat_id=CHANNEL,
-                    photo=photo,
-                    caption=caption,
-                    parse_mode="Markdown"
-                )
+            result = tg_send_photo(CHANNEL, image_path, caption)
         else:
-            await bot.send_message(
-                chat_id=CHANNEL,
-                text=caption,
-                parse_mode="Markdown"
-            )
-        logger.info("✅ Post yuborildi: %s", topic)
+            result = tg_send_message(CHANNEL, caption)
+
+        if result and result.get("ok"):
+            logger.info("✅ Post yuborildi: %s", topic)
+        else:
+            logger.error("❌ Post yuborishda xato: %s", result)
     except Exception as e:
         logger.error("❌ Post xatosi: %s", e)
 
 # ──────────────────────────────────────────────
-# Guruhda yangi a'zolarni kutib olish
+# Guruhni polling orqali kuzatish
 # ──────────────────────────────────────────────
 
-async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Yangi a'zoni guruhda kutib oladi."""
-    result = update.chat_member
-    if result is None:
-        return
+def get_offset():
+    if Path(OFFSET_FILE).exists():
+        return int(Path(OFFSET_FILE).read_text().strip() or "0")
+    return 0
 
-    old_status = result.old_chat_member.status
-    new_status = result.new_chat_member.status
+def save_offset(offset):
+    Path(OFFSET_FILE).write_text(str(offset))
 
-    # Yangi a'zo qo'shildi
-    if old_status in ("left", "kicked") and new_status == "member":
-        user = result.new_chat_member.user
-        name = f"@{user.username}" if user.username else user.first_name
+def handle_updates():
+    """Guruhdan kelgan xabarlarni qayta ishlaydi."""
+    offset = get_offset()
 
-        welcome_text = (
-            f"👋 Xush kelibsiz, {name}!\n\n"
-            f"⚡ Bu *TezWeb.uz* rasmiy muhokama guruhimiz.\n\n"
-            f"💡 Bu yerda siz:\n"
-            f"• Sayt va bot yaratish haqida savol bera olasiz\n"
-            f"• Biznes va IT yangiliklar muhokama qila olasiz\n"
-            f"• Mutaxassislarimizdan maslahat ola olasiz\n\n"
-            f"📢 Kanalimizga obuna bo'ling: @tezweb_uz\n"
-            f"🌐 Saytimiz: tezweb.uz\n"
-            f"📩 Buyurtma: @Shohdollar22"
-        )
+    while True:
+        try:
+            data = tg_get_updates(offset)
+            if not data.get("ok"):
+                time.sleep(5)
+                continue
 
-        await context.bot.send_message(
-            chat_id=result.chat.id,
-            text=welcome_text,
-            parse_mode="Markdown"
-        )
-        logger.info("👋 Yangi a'zo kutib olindi: %s", name)
+            for update in data.get("result", []):
+                offset = update["update_id"] + 1
+                save_offset(offset)
+
+                # Yangi a'zo
+                chat_member = update.get("chat_member")
+                if chat_member:
+                    old = chat_member.get("old_chat_member", {}).get("status", "")
+                    new = chat_member.get("new_chat_member", {}).get("status", "")
+                    if old in ("left", "kicked") and new == "member":
+                        user = chat_member["new_chat_member"]["user"]
+                        name = f"@{user.get('username', '')}" if user.get("username") else user.get("first_name", "")
+                        chat_id = chat_member["chat"]["id"]
+                        welcome = (
+                            f"Xush kelibsiz, {name}!\n\n"
+                            f"Bu TezWeb.uz rasmiy muhokama guruhimiz.\n\n"
+                            f"Bu yerda siz:\n"
+                            f"Sayt va bot yaratish haqida savol bera olasiz\n"
+                            f"Biznes va IT yangiliklar muhokama qila olasiz\n"
+                            f"Mutaxassislarimizdan maslahat ola olasiz\n\n"
+                            f"Kanalimizga obuna bo'ling: @tezweb_uz\n"
+                            f"Saytimiz: tezweb.uz\n"
+                            f"Buyurtma: @Shohdollar22"
+                        )
+                        tg_send_message(chat_id, welcome)
+                        logger.info("Yangi a'zo kutib olindi: %s", name)
+
+                # Guruhda xabar
+                message = update.get("message", {})
+                if message and message.get("text"):
+                    text     = message["text"]
+                    chat     = message.get("chat", {})
+                    username = chat.get("username", "")
+
+                    if username != "tezweb_uz_chat":
+                        continue
+
+                    from_user = message.get("from", {})
+                    user_name = from_user.get("username", from_user.get("first_name", "user"))
+                    chat_id   = chat["id"]
+                    msg_id    = message["message_id"]
+
+                    bot_info  = requests.get(f"{API}/getMe", timeout=10).json()
+                    bot_username = bot_info.get("result", {}).get("username", "")
+
+                    reply_to  = message.get("reply_to_message", {})
+                    is_reply  = reply_to.get("from", {}).get("is_bot", False)
+                    is_mention = bot_username and f"@{bot_username}" in text
+
+                    if not is_reply and not is_mention:
+                        continue
+
+                    question = text.replace(f"@{bot_username}", "").strip()
+                    if not question:
+                        continue
+
+                    tg_send_chat_action(chat_id)
+                    reply = generate_reply(question, user_name)
+                    requests.post(f"{API}/sendMessage", json={
+                        "chat_id": chat_id,
+                        "text": reply,
+                        "reply_to_message_id": msg_id
+                    }, timeout=30)
+                    logger.info("Javob yuborildi: %s", user_name)
+
+        except Exception as e:
+            logger.error("handle_updates xatosi: %s", e)
+            time.sleep(5)
 
 # ──────────────────────────────────────────────
-# Guruhda savollarga javob berish
-# ──────────────────────────────────────────────
-
-async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Guruh xabarlariga AI orqali javob beradi."""
-    message = update.message
-    if not message or not message.text:
-        return
-
-    # Faqat guruhda ishlaydi
-    if update.effective_chat.username != "tezweb_uz_chat":
-        return
-
-    # Botga reply yoki @mention bo'lsa javob ber
-    is_reply_to_bot = (
-        message.reply_to_message and
-        message.reply_to_message.from_user and
-        message.reply_to_message.from_user.is_bot
-    )
-    is_mention = context.bot.username and f"@{context.bot.username}" in message.text
-
-    if not is_reply_to_bot and not is_mention:
-        return
-
-    user     = update.effective_user
-    username = user.username or user.first_name
-    question = message.text.replace(f"@{context.bot.username}", "").strip()
-
-    if not question:
-        return
-
-    logger.info("Savol: %s | %s", username, question)
-
-    try:
-        # Yozmoqda ko'rsatish
-        await context.bot.send_chat_action(
-            chat_id=update.effective_chat.id,
-            action="typing"
-        )
-        reply = generate_reply(question, username)
-        await message.reply_text(reply, parse_mode="Markdown")
-        logger.info("✅ Javob yuborildi: %s", username)
-    except Exception as e:
-        logger.error("❌ Javob xatosi: %s", e)
-
-# ──────────────────────────────────────────────
-# Jadval
-# ──────────────────────────────────────────────
-
-def make_send_post(app):
-    def send_post():
-        asyncio.run(send_post_async(app.bot))
-    return send_post
-
-# ──────────────────────────────────────────────
-# Ishga tushirish
+# Jadval va ishga tushirish
 # ──────────────────────────────────────────────
 
 def main():
     if not BOT_TOKEN:
-        print("❌ CONTENT_BOT_TOKEN ni Railway Variables ga kiriting")
+        print("CONTENT_BOT_TOKEN ni Railway Variables ga kiriting")
         return
     if not ANTHROPIC_KEY:
-        print("❌ ANTHROPIC_API_KEY ni Railway Variables ga kiriting")
+        print("ANTHROPIC_API_KEY ni Railway Variables ga kiriting")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Toshkent UTC+5: 9:00→04:00, 14:00→09:00, 19:00→14:00
+    schedule.every().day.at("04:00").do(send_post)
+    schedule.every().day.at("09:00").do(send_post)
+    schedule.every().day.at("14:00").do(send_post)
 
-    # Yangi a'zolarni kutib olish
-    app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
-
-    # Guruhda savollarga javob
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_group_message))
-
-    # Jadval — Toshkent UTC+5
-    # 9:00 → 04:00 UTC
-    # 14:00 → 09:00 UTC
-    # 19:00 → 14:00 UTC
-    send_fn = make_send_post(app)
-    schedule.every().day.at("04:00").do(send_fn)
-    schedule.every().day.at("09:00").do(send_fn)
-    schedule.every().day.at("14:00").do(send_fn)
-
-    logger.info("✅ TezWeb Content Bot ishga tushdi!")
-    logger.info("📢 Kanal: %s | Guruh: %s", CHANNEL, GROUP)
-    logger.info("🕐 Post vaqtlari: 9:00, 14:00, 19:00 (Toshkent)")
-
-    # Schedule ni alohida threadda ishlatish
-    import threading
-    t = threading.Thread(target=lambda: [schedule.run_pending() or time.sleep(30) for _ in iter(int, 1)], daemon=True)
+    # Polling thread
+    t = threading.Thread(target=handle_updates, daemon=True)
     t.start()
 
-    app.run_polling(allowed_updates=["message", "chat_member"])
+    logger.info("TezWeb Content Bot ishga tushdi!")
+    logger.info("Kanal: %s | Guruh: %s", CHANNEL, GROUP)
+    logger.info("Post vaqtlari: 9:00, 14:00, 19:00 (Toshkent)")
 
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
 
 if __name__ == "__main__":
     main()
+

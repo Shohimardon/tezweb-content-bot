@@ -300,10 +300,19 @@ def handle_updates():
                     # Barcha guruhlar uchun ishlaydi
 
                     from_user = message.get("from", {})
+                    # Kanaldan kelgan xabarlarni o'tkazib yuborish
+                    sender_chat = message.get("sender_chat", {})
+                    if sender_chat.get("type") == "channel":
+                        continue
+
                     user_name = from_user.get("username", from_user.get("first_name", "user"))
                     chat_id   = chat["id"]
                     msg_id    = message["message_id"]
                     chat_type = chat.get("type", "")
+
+                    # Faqat guruhlarda ishlash
+                    if chat_type not in ("group", "supergroup"):
+                        continue
 
                     logger.info("Chat type: %s, text: %s", chat_type, text[:20])
 

@@ -298,16 +298,12 @@ def handle_updates():
                     bot_info  = requests.get(f"{API}/getMe", timeout=10).json()
                     bot_username = bot_info.get("result", {}).get("username", "")
 
-                    # Faqat yangi xabarlarga javob berish (2 daqiqadan eski emas)
-                    import time as _time
-                    msg_date = message.get("date", 0)
-                    if _time.time() - msg_date > 120:
-                        continue
-
                     reply_to     = message.get("reply_to_message", {})
                     is_reply     = reply_to.get("from", {}).get("is_bot", False)
                     is_mention   = bot_username and f"@{bot_username}" in text
                     has_question = "?" in text and len(text.strip()) > 1
+
+                    logger.info("Xabar tekshirilmoqda: is_reply=%s, is_mention=%s, has_question=%s, text=%s", is_reply, is_mention, has_question, text[:30])
 
                     if not is_reply and not is_mention and not has_question:
                         continue

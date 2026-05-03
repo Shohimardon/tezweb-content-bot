@@ -1,36 +1,37 @@
 """
-TezWeb.uz — AI Content Bot
-Telegram API ga to'g'ridan-to'g'ri requests orqali murojaat qiladi.
+Telegram Antispam Bot — TezWeb.uz
 """
 
 import json
 import logging
 import os
-import schedule
-import time
-import pytz
-import requests
-import threading
-from datetime import datetime
+import re
+import asyncio
 from pathlib import Path
 
-import anthropic
+# Railway volume mount path — agar yo'q bo'lsa /tmp ishlatamiz
+DATA_DIR = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/tmp"))
+
+from telegram import Update, ChatMember, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 # ──────────────────────────────────────────────
 # Sozlamalar
 # ──────────────────────────────────────────────
 
-BOT_TOKEN     = os.environ.get("CONTENT_BOT_TOKEN", "")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-CHANNEL       = "@tezweb_uz"
-GROUP         = "@tezweb_uz_chat"
-TASHKENT_TZ   = pytz.timezone("Asia/Tashkent")
-IMAGES_DIR    = Path("images")
-TOPIC_FILE    = "topic_index.txt"
-OFFSET_FILE       = "offset.txt"
-LAST_WELCOME_FILE = "last_welcome.txt"
+BOT_TOKEN     = os.environ.get("BOT_TOKEN", "")
+KEYWORDS_FILE = str(DATA_DIR / "keywords.json")
+SETTINGS_FILE  = str(DATA_DIR / "settings.json")
+GROUPS_FILE    = str(DATA_DIR / "groups.json")
 
-API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# Faqat shu ID'lar botni boshqara oladi
+ADMIN_IDS = {6038976942, 2018064843}
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -38,374 +39,503 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+URL_REGEX     = re.compile(r'(https?://\S+|www\.\S+|t\.me/\S+)', re.IGNORECASE)
+MENTION_REGEX = re.compile(r'@[a-zA-Z0-9_]{4,}')
+
 # ──────────────────────────────────────────────
-# Telegram API funksiyalari
+# Saqlash
 # ──────────────────────────────────────────────
 
-def tg_send_message(chat_id, text, parse_mode=None):
-    try:
-        payload = {"chat_id": chat_id, "text": text}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        r = requests.post(f"{API}/sendMessage", json=payload, timeout=30)
-        return r.json()
-    except Exception as e:
-        logger.error("sendMessage xatosi: %s", e)
-        return None
+def load_keywords() -> set:
+    if Path(KEYWORDS_FILE).exists():
+        with open(KEYWORDS_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
 
-def tg_send_photo(chat_id, photo_path, caption):
-    try:
-        with open(photo_path, "rb") as f:
-            r = requests.post(f"{API}/sendPhoto", data={
-                "chat_id": chat_id,
-                "caption": caption,
-            }, files={"photo": f}, timeout=60)
-        return r.json()
-    except Exception as e:
-        logger.error("sendPhoto xatosi: %s", e)
-        return None
+def save_keywords(keywords: set) -> None:
+    with open(KEYWORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(keywords), f, ensure_ascii=False, indent=2)
 
-def tg_get_updates(offset=0):
-    try:
-        r = requests.post(f"{API}/getUpdates", json={
-            "offset": offset,
-            "timeout": 30,
-            "allowed_updates": ["message", "chat_member"]
-        }, timeout=40)
-        return r.json()
-    except Exception as e:
-        logger.error("getUpdates xatosi: %s", e)
-        return {"ok": False, "result": []}
+def load_settings() -> dict:
+    defaults = {
+        "block_links":  True,
+        "block_photos": True,
+        "block_videos": True,
+    }
+    if Path(SETTINGS_FILE).exists():
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+            defaults.update(saved)
+    return defaults
 
-def tg_send_chat_action(chat_id, action="typing"):
+def save_settings(settings: dict) -> None:
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+KEYWORDS: set  = load_keywords()
+SETTINGS: dict = load_settings()
+
+def load_groups() -> set:
+    if Path(GROUPS_FILE).exists():
+        with open(GROUPS_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    return set()
+
+def save_groups(groups: set) -> None:
+    with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(groups), f, ensure_ascii=False, indent=2)
+
+GROUPS: set = load_groups()
+
+
+# ──────────────────────────────────────────────
+# Yordamchi funksiyalar
+# ──────────────────────────────────────────────
+
+def is_super_admin(user_id: int) -> bool:
+    """Foydalanuvchi super admin ekanligini tekshiradi."""
+    return user_id in ADMIN_IDS
+
+async def is_admin_in_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Guruhda admin ekanligini tekshiradi."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     try:
-        requests.post(f"{API}/sendChatAction", json={
-            "chat_id": chat_id,
-            "action": action
-        }, timeout=10)
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        return member.status in (ChatMember.ADMINISTRATOR, ChatMember.OWNER)
+    except Exception:
+        return False
+
+def contains_spam_word(text: str) -> str | None:
+    text_lower = text.lower()
+    for word in KEYWORDS:
+        if word.lower() in text_lower:
+            return word
+    return None
+
+def contains_link(text: str) -> bool:
+    return bool(URL_REGEX.search(text) or MENTION_REGEX.search(text))
+
+async def kick_user(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    try:
+        await context.bot.ban_chat_member(chat_id, user_id)
+        await asyncio.sleep(1)
+        await context.bot.unban_chat_member(chat_id, user_id)
+        return True
+    except Exception as e:
+        logger.error("Foydalanuvchini chiqarib bo'lmadi %s: %s", user_id, e)
+        return False
+
+async def delete_and_kick(update: Update, context: ContextTypes.DEFAULT_TYPE, reason: str) -> None:
+    message = update.message
+    user    = update.effective_user
+    chat    = update.effective_chat
+    name    = f"@{user.username}" if user.username else user.first_name
+
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.error("Xabarni o'chirib bo'lmadi: %s", e)
+
+    await kick_user(context, chat.id, user.id)
+
+    notice = await context.bot.send_message(
+        chat_id=chat.id,
+        text=(
+            f"🚫 *{name}*, siz guruh qoidalarini buzgansiz!\n"
+            f"📌 Sabab: {reason}\n"
+            f"👢 Siz guruhdan chiqarib yuborldingiz.\n\n"
+            f"🛡 Guruhingizda spam ko'pmi? Meni qo'shing — "
+            f"spamdan 24/7 himoya qilaman!"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Guruhga qo'shish", url=f"https://t.me/{context.bot.username}?startgroup=true")],
+            [InlineKeyboardButton("📢 @tezweb_uz", url="https://t.me/tezweb_uz")],
+        ])
+    )
+
+    logger.info("Qoidabuzar %s chiqarildi | sabab: %s", name, reason)
+
+    await asyncio.sleep(100)
+    try:
+        await notice.delete()
     except Exception:
         pass
 
 # ──────────────────────────────────────────────
-# Mavzular
+# Buyruqlar — faqat shaxsiy xabarda, faqat super adminlar
 # ──────────────────────────────────────────────
 
-TOPICS = [
-    ("Biznes uchun sayt yaratishning ahamiyati",          "card_01_Biznes_uchun_sayt.png"),
-    ("Telegram bot biznes daromadini qanday oshiradi",    "card_02_Telegram_Bot.png"),
-    ("Google'da birinchi bo'lish — SEO sirlari",          "card_03_Google_SEO.png"),
-    ("Tez yuklanadigan sayt mijozlarni ushlab qoladi",    "card_04_Sayt_Tezligi.png"),
-    ("Onlayn-do'kon uchun eng yaxshi texnologiyalar",     "card_05_Onlayn_Do'kon.png"),
-    ("Yandex Direktda reklama qilishning afzalliklari",   "card_06_Yandex_Direkt.png"),
-    ("Uzbekistonda internet biznes tendensiyalari",        "card_07_IT_Uzbekiston.png"),
-    ("Sayt tezligi va konversiya o'rtasidagi bog'liqlik", "card_08_Konversiya.png"),
-    ("AI botlar biznesni qanday avtomatlashtiradi",       "card_09_AI_Avtomatizatsiya.png"),
-    ("Mobil versiya nima uchun muhim",                    "card_10_Mobil_Versiya.png"),
-    ("Onlayn buyurtma tizimini qanday sozlash kerak",     "card_11_Onlayn_Buyurtma.png"),
-    ("Raqamli marketing — kichik biznes uchun qo'llanma","card_12_Raqamli_Marketing.png"),
-    ("Sayt orqali mijoz jalb qilish strategiyalari",      "card_13_Mijoz_Jalb_Qilish.png"),
-    ("Telegram orqali savdo qilishning eng yaxshi usuli", "card_14_Telegram_Savdo.png"),
-    ("IT sohasida Uzbekiston 2025-2026 yillarda",         "card_15_IT_2025-2026.png"),
-    ("Biznes uchun brend identifikatsiyasi va dizayn",    "card_16_Brend_va_Dizayn.png"),
-    ("Onlayn to'lov tizimlarini saytga ulash",            "card_17_Onlayn_To'lov.png"),
-    ("Google Ads va Yandex Direkt — qaysi yaxshi",        "card_18_Google_vs_Yandex.png"),
-    ("Google Analytics bilan biznesni boshqarish",        "card_19_Google_Analytics.png"),
-    ("Mijoz ishonchini oshiruvchi sayt elementlari",      "card_20_Mijoz_Ishonchi.png"),
-]
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    bot_username = context.bot.username
 
-def get_next_topic():
-    if Path(TOPIC_FILE).exists():
-        idx = int(Path(TOPIC_FILE).read_text().strip() or "0")
+    # Guruhda /start yozilsa — reklama xabari yuborish
+    if update.effective_chat.type in ("group", "supergroup"):
+        text = (
+            "🛡 *TezWeb Antispam Bot* — bu yerda!\n\n"
+            "Men guruhingizni spam, havolalar, rasm va videodan "
+            "*24/7 himoya qilaman!*\n\n"
+            "✅ Spamchilarni avtomatik o'chiraman\n"
+            "✅ Havolalar va reklamani bloklash\n"
+            "✅ Qoidabuzarni guruhdan chiqaraman\n\n"
+            "👥 Boshqa guruhlaringizga ham qo'shing:"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Guruhga qo'shish", url=f"https://t.me/{bot_username}?startgroup=true")],
+            [InlineKeyboardButton("📢 @tezweb_uz", url="https://t.me/tezweb_uz")],
+        ])
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+        return
+
+    if is_super_admin(update.effective_user.id):
+        text = (
+            "⚡ *TezWeb.uz — Antispam Bot*\n\n"
+            "Salom, admin! Guruhni boshqarish uchun buyruqlar:\n\n"
+            "`/addword so'z` — so'zni qora ro'yxatga qo'shish\n"
+            "`/delword so'z` — so'zni ro'yxatdan o'chirish\n"
+            "`/listwords` — barcha taqiqlangan so'zlarni ko'rish\n"
+            "`/clearwords` — ro'yxatni tozalash\n"
+            "`/settings` — hozirgi sozlamalar\n"
+            "`/toggle links` — havolalarni bloklash yoq/yoqish\n"
+            "`/toggle photos` — rasmlarni bloklash yoq/yoqish\n"
+            "`/toggle videos` — videolarni bloklash yoq/yoqish\n"
+            "`/info` — bot yaratuvchisi haqida"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Guruhga qo'shish", url=f"https://t.me/{bot_username}?startgroup=true")],
+            [InlineKeyboardButton("📢 Kanalimiz", url="https://t.me/tezweb_uz")],
+        ])
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
     else:
-        idx = 0
-    topic, image = TOPICS[idx % len(TOPICS)]
-    Path(TOPIC_FILE).write_text(str((idx + 1) % len(TOPICS)))
-    return topic, image
+        text = (
+            "🛡 *TezWeb Antispam Bot*\n\n"
+            "Assalomu alaykum! Men guruhingizni spam, havolalar, "
+            "rasm va videodan *24/7 himoya qilaman!*\n\n"
+            "✅ Spamchilarni avtomatik o'chiraman\n"
+            "✅ Havolalar va @username larni bloklash\n"
+            "✅ Foto va video yuborishni bloklash\n"
+            "✅ Qoidabuzarni guruhdan chiqaraman\n\n"
+            "📌 *Guruhingizda spam ko'p bo'lsa* — meni qo'shing, "
+            "barcha spamchilarni o'chirib tashlayman!\n\n"
+            "💬 Guruhingiz uchun maxsus so'zlar qo'shish yoki "
+            "sozlash uchun: @Shohdollar22 ga yozing"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Guruhga qo'shish", url=f"https://t.me/{bot_username}?startgroup=true")],
+            [InlineKeyboardButton("📢 Kanalimiz", url="https://t.me/tezweb_uz")],
+            [InlineKeyboardButton("💬 @Shohdollar22 ga yozish", url="https://t.me/Shohdollar22")],
+        ])
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-# ──────────────────────────────────────────────
-# AI post yaratish
-# ──────────────────────────────────────────────
 
-def generate_post(topic):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    hours  = datetime.now(TASHKENT_TZ).hour
-    if hours < 12:
-        vaqt = "ertalab"
-    elif hours < 17:
-        vaqt = "kunduz"
-    else:
-        vaqt = "kechqurun"
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        return
 
-    msg = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=[{"role": "user", "content": f"""Sen TezWeb.uz kompaniyasining Telegram kanal menejerisisan.
-TezWeb.uz — Uzbekistonda tez yuklanadigan saytlar, Telegram botlar va reklama xizmatlarini taqdim etuvchi IT kompaniya.
-
-Mavzu: {topic}
-
-Talablar:
-- Til: O'zbek tili (lotin alifbosi)
-- Uzunlik: 150-250 so'z
-- Qiziqarli fakt yoki savol bilan boshlang
-- Qisqa paragraflar, emojilar ishlatilsin
-- Oxirida TezWeb.uz ni tabiiy tarzda tavsiya qil
-- Eng oxirgi qator: "tezweb.uz | @tezweb_uz | @Shohdollar22"
-- Faqat post matnini yoz"""}]
+    text = (
+        "⚡ *TezWeb.uz*\n"
+        "_Tezroq yuklanadigan va buyurtma keltiruvchi saytlar_\n\n"
+        "Onlayn-do'konlar, kafe, yetkazib berish va har qanday biznes uchun "
+        "1 soniyada yuklanadigan saytlar yaratamiz. Toza kod, "
+        "SEO 100/100 va Telegram integratsiyasi.\n\n"
+        "📌 *Biz nima qilamiz:*\n"
+        "• Toza kodda saytlar — 8 000 000 so'mdan\n"
+        "• AI Telegram botlar — 6 000 000 so'mdan\n"
+        "• Yandex Direct va Google Ads\n"
+        "• SEO ilgari surish\n\n"
+        "✅ Birinchi buyurtmalar 3 kunda\n"
+        "✅ 15 daqiqada javob beramiz\n"
+        "✅ Natija yoki pul qaytarish"
     )
-    return msg.content[0].text
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌐 Sayt", url="https://tezweb.uz/")],
+        [InlineKeyboardButton("💬 Telegram'da yozish", url="https://t.me/Shohdollar22")],
+    ])
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
-def generate_reply(question, username):
-    client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    msg = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=500,
-        messages=[{"role": "user", "content": f"""Sen TezWeb.uz kompaniyasining aqlli yordamchisisisan.
-TezWeb.uz xizmatlari va narxlari:
-- Minimal sayt: 5 000 000 so'mdan
-- Biznes sayt: 8 000 000 so'mdan
-- Sayt + reklama: 18 000 000 so'mdan
-- Boshlangich bot: 6 000 000 so'mdan
-- Biznes bot: 14 000 000 so'mdan
-- AI bot: 22 000 000 so'mdan
-- Reklama (Direkt/Ads): 4 000 000 so'm/oydan
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
 
-Foydalanuvchi @{username} savol berdi: "{question}"
-
-Qoidalar:
-- Faqat sayt, bot, IT, biznes, reklama mavzularida javob ber
-- Boshqa mavzularda: "Kechirasiz, men faqat IT va biznes mavzularida yordam bera olaman"
-- Javob qisqa va aniq (max 150 so'z), o'zbek tilida
-- Oxirida: "Batafsil: @Shohdollar22"
-- Faqat javob matnini yoz"""}]
+    yoq  = "✅ Yoqilgan"
+    yoqq = "❌ O'chirilgan"
+    text = (
+        "⚙️ *Hozirgi bot sozlamalari:*\n\n"
+        f"🔗 Havolalarni bloklash: {yoq if SETTINGS['block_links']  else yoqq}\n"
+        f"📷 Rasmlarni bloklash:   {yoq if SETTINGS['block_photos'] else yoqq}\n"
+        f"🎥 Videolarni bloklash:  {yoq if SETTINGS['block_videos'] else yoqq}\n\n"
+        "O'zgartirish: `/toggle links` / `/toggle photos` / `/toggle videos`"
     )
-    return msg.content[0].text
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-# ──────────────────────────────────────────────
-# Post yuborish
-# ──────────────────────────────────────────────
 
-def send_post():
-    topic, image_file = get_next_topic()
-    image_path = IMAGES_DIR / image_file
-    logger.info("Post yaratilmoqda: %s", topic)
+async def cmd_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
 
-    try:
-        caption = generate_post(topic)
-        if image_path.exists():
-            result = tg_send_photo(CHANNEL, image_path, caption)
-        else:
-            result = tg_send_message(CHANNEL, caption)
+    if not context.args:
+        await update.message.reply_text(
+            "Ishlatish: `/toggle links` / `/toggle photos` / `/toggle videos`",
+            parse_mode="Markdown"
+        )
+        return
 
-        if result and result.get("ok"):
-            logger.info("✅ Post yuborildi: %s", topic)
-        else:
-            logger.error("❌ Post yuborishda xato: %s", result)
-    except Exception as e:
-        logger.error("❌ Post xatosi: %s", e)
+    arg     = context.args[0].lower()
+    mapping = {"links": "block_links", "photos": "block_photos", "videos": "block_videos"}
 
-# ──────────────────────────────────────────────
-# Guruhni polling orqali kuzatish
-# ──────────────────────────────────────────────
+    if arg not in mapping:
+        await update.message.reply_text(
+            "❌ Noto'g'ri parametr. Foydalaning: `links`, `photos`, `videos`",
+            parse_mode="Markdown"
+        )
+        return
 
-def get_last_welcome():
-    """Oxirgi xush kelibsiz xabar ID sini oladi."""
-    if Path(LAST_WELCOME_FILE).exists():
+    key = mapping[arg]
+    SETTINGS[key] = not SETTINGS[key]
+    save_settings(SETTINGS)
+
+    holat  = "✅ yoqildi" if SETTINGS[key] else "❌ o'chirildi"
+    nomlar = {"links": "Havolalarni bloklash", "photos": "Rasmlarni bloklash", "videos": "Videolarni bloklash"}
+    await update.message.reply_text(f"{nomlar[arg]}: {holat}")
+
+
+async def cmd_addword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Ishlatish: `/addword so'z`", parse_mode="Markdown")
+        return
+
+    word = " ".join(context.args).strip().lower()
+    if word in KEYWORDS:
+        await update.message.reply_text(f'*"{word}"* so\'zi allaqachon ro\'yxatda.', parse_mode="Markdown")
+        return
+
+    KEYWORDS.add(word)
+    save_keywords(KEYWORDS)
+    await update.message.reply_text(f'✅ Qo\'shildi: *"{word}"*\n\n🔍 Endi bu so\'z bilan yangi xabarlar avtomatik o\'chiriladi.', parse_mode="Markdown")
+
+
+async def cmd_delword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Ishlatish: `/delword so'z`", parse_mode="Markdown")
+        return
+
+    word = " ".join(context.args).strip().lower()
+    if word not in KEYWORDS:
+        await update.message.reply_text(f'*"{word}"* so\'zi ro\'yxatda topilmadi.', parse_mode="Markdown")
+        return
+
+    KEYWORDS.discard(word)
+    save_keywords(KEYWORDS)
+    await update.message.reply_text(f'🗑 O\'chirildi: *"{word}"*', parse_mode="Markdown")
+
+
+async def cmd_listwords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
+    if not KEYWORDS:
+        await update.message.reply_text("📋 Taqiqlangan so'zlar ro'yxati bo'sh.")
+        return
+
+    words = sorted(KEYWORDS)
+    lines = "\n".join(f"  • {w}" for w in words)
+    await update.message.reply_text(
+        f"📋 Taqiqlangan sozlar ({len(words)}):\n\n{lines}",
+    )
+
+
+async def cmd_clearwords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat.type != "private":
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
+    KEYWORDS.clear()
+    save_keywords(KEYWORDS)
+    await update.message.reply_text("🧹 Taqiqlangan so'zlar ro'yxati tozalandi.")
+
+
+
+
+async def cmd_addgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Guruhni reklama ro'yxatiga qo'shish — guruhdan yuboring."""
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Bu buyruqni guruhda yuboring.")
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
+
+    chat_id = update.effective_chat.id
+    chat_title = update.effective_chat.title or str(chat_id)
+    GROUPS.add(chat_id)
+    save_groups(GROUPS)
+    logger.info("Guruh qo\'shildi: %s (%s)", chat_title, chat_id)
+    await update.message.reply_text(f"✅ *{chat_title}* reklama ro\'yxatiga qo\'shildi!", parse_mode="Markdown")
+
+
+async def cmd_removegroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Guruhni reklama ro'yxatidan o'chirish."""
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Bu buyruqni guruhda yuboring.")
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
+
+    chat_id = update.effective_chat.id
+    chat_title = update.effective_chat.title or str(chat_id)
+    GROUPS.discard(chat_id)
+    save_groups(GROUPS)
+    await update.message.reply_text(f"🗑 *{chat_title}* ro\'yxatdan o\'chirildi.", parse_mode="Markdown")
+
+
+async def cmd_listgroups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reklama guruhlari ro'yxatini ko'rish — shaxsiy xabarda."""
+    if update.effective_chat.type != "private":
+        return
+    if not is_super_admin(update.effective_user.id):
+        return
+    if not GROUPS:
+        await update.message.reply_text("📋 Reklama guruhlari ro\'yxati bo\'sh.\n\nQo\'shish uchun guruhga boring va /addgroup yuboring.")
+        return
+    await update.message.reply_text(f"📋 Reklama guruhlari: {len(GROUPS)} ta\n\n" + "\n".join(f"• {g}" for g in GROUPS))
+
+
+async def send_promo(bot) -> None:
+    """Barcha guruhlarga reklama yuboradi."""
+    if not GROUPS:
+        logger.info("Reklama guruhlari yo\'q.")
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Guruhga qo\'shish", url=f"https://t.me/{bot.username}?startgroup=true")],
+        [InlineKeyboardButton("📢 @tezweb_uz", url="https://t.me/tezweb_uz")],
+    ])
+
+    text = (
+        "🛡 *Guruhingizda spam ko\'p bo\'lsa* — meni qo\'shing!\n\n"
+        "✅ Spamchilarni avtomatik o\'chiraman\n"
+        "✅ Havolalar va reklamani bloklash\n"
+        "✅ 24/7 ishlayman, hech narsa o\'tkazib yubormayman\n\n"
+        "👇 Qo\'shish uchun tugmani bosing:"
+    )
+
+    sent, failed = 0, 0
+    for chat_id in list(GROUPS):
         try:
-            data = json.loads(Path(LAST_WELCOME_FILE).read_text())
-            return data.get("chat_id"), data.get("msg_id")
-        except Exception:
-            pass
-    return None, None
-
-def save_last_welcome(chat_id, msg_id):
-    """Oxirgi xush kelibsiz xabar ID sini saqlaydi."""
-    Path(LAST_WELCOME_FILE).write_text(json.dumps({"chat_id": chat_id, "msg_id": msg_id}))
-
-def get_offset():
-    if Path(OFFSET_FILE).exists():
-        return int(Path(OFFSET_FILE).read_text().strip() or "0")
-    return 0
-
-def save_offset(offset):
-    Path(OFFSET_FILE).write_text(str(offset))
-
-def handle_updates():
-    """Guruhdan kelgan xabarlarni qayta ishlaydi."""
-    offset = get_offset()
-
-    # Eski instance to'xtashi uchun kutamiz
-    time.sleep(15)
-
-    # Bot username ni bir marta olamiz
-    try:
-        bot_info = requests.get(f"{API}/getMe", timeout=10).json()
-        bot_username = bot_info.get("result", {}).get("username", "")
-        logger.info("Bot username: @%s", bot_username)
-    except Exception:
-        bot_username = ""
-        logger.error("Bot username olishda xato")
-
-    while True:
-        try:
-            data = tg_get_updates(offset)
-            if not data.get("ok"):
-                logger.error("getUpdates xato: %s", data)
-                time.sleep(5)
-                continue
-
-            results = data.get("result", [])
-            if results:
-                logger.info("Yangi yangilanishlar: %d ta", len(results))
-
-            for update in results:
-                offset = update["update_id"] + 1
-                save_offset(offset)
-
-                # Debug: update turini ko'rish
-                update_keys = [k for k in update.keys() if k != "update_id"]
-                logger.info("Update turi: %s", update_keys)
-
-                # Yangi a'zo
-                chat_member = update.get("chat_member")
-                if chat_member:
-                    old = chat_member.get("old_chat_member", {}).get("status", "")
-                    new = chat_member.get("new_chat_member", {}).get("status", "")
-                    if old in ("left", "kicked") and new == "member":
-                        user = chat_member["new_chat_member"]["user"]
-                        name = f"@{user.get('username', '')}" if user.get("username") else user.get("first_name", "")
-                        chat_id = chat_member["chat"]["id"]
-                        welcome = (
-                            f"Xush kelibsiz, {name}!\n\n"
-                            f"Bu TezWeb.uz rasmiy muhokama guruhimiz.\n\n"
-                            f"Bu yerda siz:\n"
-                            f"Sayt va bot yaratish haqida savol bera olasiz\n"
-                            f"Biznes va IT yangiliklar muhokama qila olasiz\n"
-                            f"Mutaxassislarimizdan maslahat ola olasiz\n\n"
-                            f"Kanalimizga obuna bo'ling: @tezweb_uz\n"
-                            f"Saytimiz: tezweb.uz\n"
-                            f"Buyurtma: @Shohdollar22"
-                        )
-                        tg_send_message(chat_id, welcome)
-                        logger.info("Yangi a'zo kutib olindi: %s", name)
-
-                # Yangi a'zo (new_chat_members orqali)
-                message_raw = update.get("message", {})
-                new_members = message_raw.get("new_chat_members", [])
-                if new_members:
-                    chat_id = message_raw["chat"]["id"]
-                    for user in new_members:
-                        if user.get("is_bot"):
-                            continue
-                        name = f"@{user['username']}" if user.get("username") else user.get("first_name", "")
-                        welcome = (
-                            f"Xush kelibsiz, {name}!\n\n"
-                            f"Bu TezWeb.uz rasmiy muhokama guruhimiz.\n\n"
-                            f"Bu yerda siz sayt, bot, IT va biznes mavzularida\n"
-                            f"savol berishingiz mumkin.\n\n"
-                            f"Savol berish uchun xabar oxiriga ? belgisini qoyish yoki\n"
-                            f"botning xabariga reply qilish kifoya — men javob beraman!\n\n"
-                            f"Kanalimiz: @tezweb_uz\n"
-                            f"Saytimiz: tezweb.uz\n"
-                            f"Buyurtma: @Shohdollar22"
-                        )
-                        result = tg_send_message(chat_id, welcome, parse_mode=None)
-                        logger.info("Yangi azu kutib olindi: %s | chat_id: %s | result: %s", name, chat_id, result)
-
-                # Guruhda xabar
-                message = update.get("message", {})
-                if message and message.get("text"):
-                    text      = message["text"]
-                    chat      = message.get("chat", {})
-                    from_user = message.get("from", {})
-                    sender_chat = message.get("sender_chat", {})
-
-                    logger.info("from_user=%s, sender_chat=%s, chat_type=%s",
-                        from_user.get("username", from_user.get("first_name", "?")),
-                        sender_chat.get("type", "none"),
-                        chat.get("type", "?"))
-
-                    # Faqat kanaldan avtomatik post emas
-                    if not from_user and sender_chat.get("type") == "channel":
-                        continue
-
-                    user_name = from_user.get("username", from_user.get("first_name", "user"))
-                    chat_id   = chat["id"]
-                    msg_id    = message["message_id"]
-                    chat_type = chat.get("type", "")
-
-                    # Faqat guruhlarda ishlash
-                    if chat_type not in ("group", "supergroup"):
-                        continue
-
-                    logger.info("Chat type: %s, text: %s", chat_type, text[:20])
-
-                    reply_to     = message.get("reply_to_message", {})
-                    is_reply     = reply_to.get("from", {}).get("is_bot", False)
-                    is_mention   = bot_username and f"@{bot_username}" in text
-                    has_question = "?" in text and len(text.strip()) > 1
-
-                    logger.info("Xabar tekshirilmoqda: is_reply=%s, is_mention=%s, has_question=%s, text=%s", is_reply, is_mention, has_question, text[:30])
-
-                    if not is_reply and not is_mention and not has_question:
-                        continue
-
-                    # Botdan xabar emas
-                    if from_user.get("is_bot") and not is_reply:
-                        logger.info("Bot xabari o'tkazib yuborildi")
-                        continue
-
-                    question = text.replace(f"@{bot_username}", "").strip()
-                    if not question:
-                        logger.info("Savol bo'sh, o'tkazib yuborildi")
-                        continue
-
-                    logger.info("Javob tayyorlanmoqda: from_user=%s, is_bot=%s", user_name, from_user.get("is_bot"))
-                    tg_send_chat_action(chat_id)
-                    try:
-                        reply = generate_reply(question, user_name)
-                        result = requests.post(f"{API}/sendMessage", json={
-                            "chat_id": chat_id,
-                            "text": reply,
-                            "reply_to_message_id": msg_id
-                        }, timeout=30).json()
-                        logger.info("Javob yuborildi: %s | ok=%s", user_name, result.get("ok"))
-                    except Exception as reply_err:
-                        logger.error("Javob yuborishda xato: %s", reply_err)
-
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=keyboard)
+            sent += 1
         except Exception as e:
-            logger.error("handle_updates xatosi: %s", e)
-            time.sleep(5)
+            logger.error("Guruhga yuborib bo\'lmadi %s: %s", chat_id, e)
+            failed += 1
+
+    logger.info("Reklama yuborildi: %d ta, xato: %d ta", sent, failed)
 
 # ──────────────────────────────────────────────
-# Jadval va ishga tushirish
+# Guruhda xabarlarni tekshirish
 # ──────────────────────────────────────────────
 
-def main():
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if not message or not message.text:
+        return
+    if update.effective_chat.type == "private":
+        return
+    if await is_admin_in_chat(update, context):
+        return
+
+    text = message.text
+
+    found_word = contains_spam_word(text)
+    if found_word:
+        await delete_and_kick(update, context, f"Taqiqlangan so'z: \"{found_word}\"")
+        return
+
+    if SETTINGS["block_links"] and contains_link(text):
+        await delete_and_kick(update, context, "Xabar ichida havola (link) bor")
+        return
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not SETTINGS["block_photos"]:
+        return
+    if update.effective_chat.type == "private":
+        return
+    # Kanaldan kelgan xabarlarni o'tkazib yuborish
+    if update.effective_message and update.effective_message.sender_chat:
+        return
+    if await is_admin_in_chat(update, context):
+        return
+    await delete_and_kick(update, context, "Guruhda rasm yuborish taqiqlangan")
+
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not SETTINGS["block_videos"]:
+        return
+    if update.effective_chat.type == "private":
+        return
+    # Kanaldan kelgan xabarlarni o'tkazib yuborish
+    if update.effective_message and update.effective_message.sender_chat:
+        return
+    if await is_admin_in_chat(update, context):
+        return
+    await delete_and_kick(update, context, "Guruhda video yuborish taqiqlangan")
+
+
+# ──────────────────────────────────────────────
+# Ishga tushirish
+# ──────────────────────────────────────────────
+
+def main() -> None:
     if not BOT_TOKEN:
-        print("CONTENT_BOT_TOKEN ni Railway Variables ga kiriting")
-        return
-    if not ANTHROPIC_KEY:
-        print("ANTHROPIC_API_KEY ni Railway Variables ga kiriting")
+        print("❌ Railway Variables orqali tokenni kiriting: BOT_TOKEN=sizning_tokeningiz")
         return
 
-    # Toshkent UTC+5: 9:00→04:00, 14:00→09:00, 19:00→14:00
-    schedule.every().day.at("04:00").do(send_post)  # 9:00 Toshkent
-    schedule.every().day.at("09:00").do(send_post)  # 14:00 Toshkent
-    schedule.every().day.at("14:00").do(send_post)  # 19:00 Toshkent
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    # Polling thread
-    t = threading.Thread(target=handle_updates, daemon=True)
-    t.start()
+    app.add_handler(CommandHandler("start",      cmd_start))
+    app.add_handler(CommandHandler("info",       cmd_info))
+    app.add_handler(CommandHandler("settings",   cmd_settings))
+    app.add_handler(CommandHandler("toggle",     cmd_toggle))
+    app.add_handler(CommandHandler("addword",    cmd_addword))
+    app.add_handler(CommandHandler("delword",    cmd_delword))
+    app.add_handler(CommandHandler("listwords",  cmd_listwords))
+    app.add_handler(CommandHandler("clearwords", cmd_clearwords))
 
-    logger.info("TezWeb Content Bot ishga tushdi!")
-    logger.info("Kanal: %s | Guruh: %s", CHANNEL, GROUP)
-    logger.info("Post vaqtlari: 9:00, 14:00, 19:00 (Toshkent)")
+    app.add_handler(CommandHandler("addgroup",    cmd_addgroup))
+    app.add_handler(CommandHandler("removegroup", cmd_removegroup))
+    app.add_handler(CommandHandler("listgroups",  cmd_listgroups))
 
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO,                   handle_photo))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, handle_video))
+
+    # Jadval — 7:00 va 21:00 Toshkent vaqti (UTC+5 = 02:00 va 16:00 UTC)
+    import datetime as dt
+
+    async def promo_job(ctx):
+        await send_promo(ctx.bot)
+
+    job_queue = app.job_queue
+    job_queue.run_daily(promo_job, time=dt.time(2, 0, 0))   # 7:00 Toshkent
+    job_queue.run_daily(promo_job, time=dt.time(16, 0, 0))  # 21:00 Toshkent
+
+    logger.info("✅ TezWeb Antispam Bot ishga tushdi!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()

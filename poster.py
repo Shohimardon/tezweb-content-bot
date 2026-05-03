@@ -225,10 +225,15 @@ def handle_updates():
         try:
             data = tg_get_updates(offset)
             if not data.get("ok"):
+                logger.error("getUpdates xato: %s", data)
                 time.sleep(5)
                 continue
 
-            for update in data.get("result", []):
+            results = data.get("result", [])
+            if results:
+                logger.info("Yangi yangilanishlar: %d ta", len(results))
+
+            for update in results:
                 offset = update["update_id"] + 1
                 save_offset(offset)
 
@@ -342,7 +347,7 @@ def main():
 
     # Toshkent UTC+5: 9:00→04:00, 14:00→09:00, 19:00→14:00
     schedule.every().day.at("04:00").do(send_post)
-    schedule.every().day.at("09:06").do(send_post)
+    schedule.every().day.at("09:00").do(send_post)
     schedule.every().day.at("14:00").do(send_post)
 
     # Polling thread

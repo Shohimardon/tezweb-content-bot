@@ -299,14 +299,18 @@ def handle_updates():
                 # Guruhda xabar
                 message = update.get("message", {})
                 if message and message.get("text"):
-                    text     = message["text"]
-                    chat     = message.get("chat", {})
-                    # Barcha guruhlar uchun ishlaydi
-
+                    text      = message["text"]
+                    chat      = message.get("chat", {})
                     from_user = message.get("from", {})
-                    # Kanaldan kelgan xabarlarni o'tkazib yuborish
                     sender_chat = message.get("sender_chat", {})
-                    if sender_chat.get("type") == "channel":
+
+                    logger.info("from_user=%s, sender_chat=%s, chat_type=%s",
+                        from_user.get("username", from_user.get("first_name", "?")),
+                        sender_chat.get("type", "none"),
+                        chat.get("type", "?"))
+
+                    # Faqat kanaldan avtomatik post emas
+                    if not from_user and sender_chat.get("type") == "channel":
                         continue
 
                     user_name = from_user.get("username", from_user.get("first_name", "user"))

@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # Telegram API funksiyalari
 # ──────────────────────────────────────────────
 
-def tg_send_message(chat_id, text, parse_mode="Markdown"):
+def tg_send_message(chat_id, text, parse_mode=None):
     try:
         payload = {"chat_id": chat_id, "text": text}
         if parse_mode:
@@ -375,7 +375,7 @@ def main():
 
     # Toshkent UTC+5: 9:00→04:00, 14:00→09:00, 19:00→14:00
     schedule.every().day.at("05:30").do(send_post)  # TEST 10:30 Toshkent
-    schedule.every().day.at("05:45").do(send_post)  # 9:00 Toshkent
+    schedule.every().day.at("05:53").do(send_post)  # 9:00 Toshkent
     schedule.every().day.at("09:00").do(send_post)  # 14:00 Toshkent
     schedule.every().day.at("14:00").do(send_post)  # 19:00 Toshkent
 

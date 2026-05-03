@@ -246,6 +246,10 @@ def handle_updates():
                 offset = update["update_id"] + 1
                 save_offset(offset)
 
+                # Debug: update turini ko'rish
+                update_keys = [k for k in update.keys() if k != "update_id"]
+                logger.info("Update turi: %s", update_keys)
+
                 # Yangi a'zo
                 chat_member = update.get("chat_member")
                 if chat_member:
@@ -383,4 +387,4 @@ def main():
         time.sleep(30)
 
 if __name__ == "__main__":
-    main()
+    main(

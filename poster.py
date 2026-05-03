@@ -326,15 +326,17 @@ def handle_updates():
                     if not is_reply and not is_mention and not has_question:
                         continue
 
-                    # Botdan xabar emas, oddiy savol
-                    if from_user.get("is_bot"):
+                    # Botdan xabar emas
+                    if from_user.get("is_bot") and not is_reply:
+                        logger.info("Bot xabari o'tkazib yuborildi")
                         continue
 
                     question = text.replace(f"@{bot_username}", "").strip()
                     if not question:
+                        logger.info("Savol bo'sh, o'tkazib yuborildi")
                         continue
 
-                    logger.info("Javob tayyorlanmoqda: %s | savol: %s", user_name, question[:30])
+                    logger.info("Javob tayyorlanmoqda: from_user=%s, is_bot=%s", user_name, from_user.get("is_bot"))
                     tg_send_chat_action(chat_id)
                     try:
                         reply = generate_reply(question, user_name)

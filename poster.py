@@ -221,6 +221,15 @@ def handle_updates():
     """Guruhdan kelgan xabarlarni qayta ishlaydi."""
     offset = get_offset()
 
+    # Bot username ni bir marta olamiz
+    try:
+        bot_info = requests.get(f"{API}/getMe", timeout=10).json()
+        bot_username = bot_info.get("result", {}).get("username", "")
+        logger.info("Bot username: @%s", bot_username)
+    except Exception:
+        bot_username = ""
+        logger.error("Bot username olishda xato")
+
     while True:
         try:
             data = tg_get_updates(offset)
@@ -294,9 +303,9 @@ def handle_updates():
                     user_name = from_user.get("username", from_user.get("first_name", "user"))
                     chat_id   = chat["id"]
                     msg_id    = message["message_id"]
+                    chat_type = chat.get("type", "")
 
-                    bot_info  = requests.get(f"{API}/getMe", timeout=10).json()
-                    bot_username = bot_info.get("result", {}).get("username", "")
+                    logger.info("Chat type: %s, text: %s", chat_type, text[:20])
 
                     reply_to     = message.get("reply_to_message", {})
                     is_reply     = reply_to.get("from", {}).get("is_bot", False)

@@ -316,14 +316,18 @@ def handle_updates():
                     if not question:
                         continue
 
+                    logger.info("Javob tayyorlanmoqda: %s | savol: %s", user_name, question[:30])
                     tg_send_chat_action(chat_id)
-                    reply = generate_reply(question, user_name)
-                    requests.post(f"{API}/sendMessage", json={
-                        "chat_id": chat_id,
-                        "text": reply,
-                        "reply_to_message_id": msg_id
-                    }, timeout=30)
-                    logger.info("Javob yuborildi: %s", user_name)
+                    try:
+                        reply = generate_reply(question, user_name)
+                        result = requests.post(f"{API}/sendMessage", json={
+                            "chat_id": chat_id,
+                            "text": reply,
+                            "reply_to_message_id": msg_id
+                        }, timeout=30).json()
+                        logger.info("Javob yuborildi: %s | ok=%s", user_name, result.get("ok"))
+                    except Exception as reply_err:
+                        logger.error("Javob yuborishda xato: %s", reply_err)
 
         except Exception as e:
             logger.error("handle_updates xatosi: %s", e)

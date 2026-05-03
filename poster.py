@@ -220,6 +220,9 @@ def handle_updates():
     """Guruhdan kelgan xabarlarni qayta ishlaydi."""
     offset = get_offset()
 
+    # Eski instance to'xtashi uchun kutamiz
+    time.sleep(15)
+
     # Bot username ni bir marta olamiz
     try:
         bot_info = requests.get(f"{API}/getMe", timeout=10).json()
@@ -373,7 +376,6 @@ def main():
         return
 
     # Toshkent UTC+5: 9:00→04:00, 14:00→09:00, 19:00→14:00
-    schedule.every().day.at("06:00").do(send_post)  # TEST 11:00 Toshkent
     schedule.every().day.at("04:00").do(send_post)  # 9:00 Toshkent
     schedule.every().day.at("09:00").do(send_post)  # 14:00 Toshkent
     schedule.every().day.at("14:00").do(send_post)  # 19:00 Toshkent
@@ -392,3 +394,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

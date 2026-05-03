@@ -58,7 +58,6 @@ def tg_send_photo(chat_id, photo_path, caption):
             r = requests.post(f"{API}/sendPhoto", data={
                 "chat_id": chat_id,
                 "caption": caption,
-                "parse_mode": "Markdown"
             }, files={"photo": f}, timeout=60)
         return r.json()
     except Exception as e:
@@ -374,8 +373,8 @@ def main():
         return
 
     # Toshkent UTC+5: 9:00→04:00, 14:00→09:00, 19:00→14:00
-    schedule.every().day.at("05:30").do(send_post)  # TEST 10:30 Toshkent
-    schedule.every().day.at("05:53").do(send_post)  # 9:00 Toshkent
+    schedule.every().day.at("06:00").do(send_post)  # TEST 11:00 Toshkent
+    schedule.every().day.at("04:00").do(send_post)  # 9:00 Toshkent
     schedule.every().day.at("09:00").do(send_post)  # 14:00 Toshkent
     schedule.every().day.at("14:00").do(send_post)  # 19:00 Toshkent
 

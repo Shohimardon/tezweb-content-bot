@@ -27,7 +27,8 @@ GROUP         = "@tezweb_uz_chat"
 TASHKENT_TZ   = pytz.timezone("Asia/Tashkent")
 IMAGES_DIR    = Path("images")
 TOPIC_FILE    = "topic_index.txt"
-OFFSET_FILE   = "offset.txt"
+OFFSET_FILE       = "offset.txt"
+LAST_WELCOME_FILE = "last_welcome.txt"
 
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -207,6 +208,20 @@ def send_post():
 # ──────────────────────────────────────────────
 # Guruhni polling orqali kuzatish
 # ──────────────────────────────────────────────
+
+def get_last_welcome():
+    """Oxirgi xush kelibsiz xabar ID sini oladi."""
+    if Path(LAST_WELCOME_FILE).exists():
+        try:
+            data = json.loads(Path(LAST_WELCOME_FILE).read_text())
+            return data.get("chat_id"), data.get("msg_id")
+        except Exception:
+            pass
+    return None, None
+
+def save_last_welcome(chat_id, msg_id):
+    """Oxirgi xush kelibsiz xabar ID sini saqlaydi."""
+    Path(LAST_WELCOME_FILE).write_text(json.dumps({"chat_id": chat_id, "msg_id": msg_id}))
 
 def get_offset():
     if Path(OFFSET_FILE).exists():
@@ -394,4 +409,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

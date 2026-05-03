@@ -267,11 +267,11 @@ def handle_updates():
                         welcome = (
                             f"Xush kelibsiz, {name}!\n\n"
                             f"Bu TezWeb.uz rasmiy muhokama guruhimiz.\n\n"
-                            f"Bu yerda siz:\n"
-                            f"- Sayt va bot yaratish haqida savol bera olasiz\n"
-                            f"- Biznes va IT yangiliklar muhokama qila olasiz\n"
-                            f"- Mutaxassislarimizdan maslahat ola olasiz\n\n"
-                            f"Kanalimizga obuna boling: @tezweb_uz\n"
+                            f"Bu yerda siz sayt, bot, IT va biznes mavzularida\n"
+                            f"savol berishingiz mumkin.\n\n"
+                            f"Savol berish uchun xabar oxiriga ? belgisini qoyish yoki\n"
+                            f"botning xabariga reply qilish kifoya — men javob beraman!\n\n"
+                            f"Kanalimiz: @tezweb_uz\n"
                             f"Saytimiz: tezweb.uz\n"
                             f"Buyurtma: @Shohdollar22"
                         )
@@ -293,11 +293,16 @@ def handle_updates():
                     bot_info  = requests.get(f"{API}/getMe", timeout=10).json()
                     bot_username = bot_info.get("result", {}).get("username", "")
 
-                    reply_to  = message.get("reply_to_message", {})
-                    is_reply  = reply_to.get("from", {}).get("is_bot", False)
-                    is_mention = bot_username and f"@{bot_username}" in text
+                    reply_to     = message.get("reply_to_message", {})
+                    is_reply     = reply_to.get("from", {}).get("is_bot", False)
+                    is_mention   = bot_username and f"@{bot_username}" in text
+                    has_question = "?" in text
 
-                    if not is_reply and not is_mention:
+                    if not is_reply and not is_mention and not has_question:
+                        continue
+
+                    # Botdan xabar emas, oddiy savol
+                    if from_user.get("is_bot"):
                         continue
 
                     question = text.replace(f"@{bot_username}", "").strip()

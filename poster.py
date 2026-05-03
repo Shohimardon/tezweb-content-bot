@@ -67,7 +67,7 @@ def tg_send_photo(chat_id, photo_path, caption):
 
 def tg_get_updates(offset=0):
     try:
-        r = requests.get(f"{API}/getUpdates", params={
+        r = requests.post(f"{API}/getUpdates", json={
             "offset": offset,
             "timeout": 30,
             "allowed_updates": ["message", "chat_member"]
@@ -293,10 +293,16 @@ def handle_updates():
                     bot_info  = requests.get(f"{API}/getMe", timeout=10).json()
                     bot_username = bot_info.get("result", {}).get("username", "")
 
+                    # Faqat yangi xabarlarga javob berish (2 daqiqadan eski emas)
+                    import time as _time
+                    msg_date = message.get("date", 0)
+                    if _time.time() - msg_date > 120:
+                        continue
+
                     reply_to     = message.get("reply_to_message", {})
                     is_reply     = reply_to.get("from", {}).get("is_bot", False)
                     is_mention   = bot_username and f"@{bot_username}" in text
-                    has_question = "?" in text
+                    has_question = "?" in text and len(text.strip()) > 1
 
                     if not is_reply and not is_mention and not has_question:
                         continue
@@ -336,7 +342,7 @@ def main():
 
     # Toshkent UTC+5: 9:00→04:00, 14:00→09:00, 19:00→14:00
     schedule.every().day.at("04:00").do(send_post)
-    schedule.every().day.at("09:00").do(send_post)
+    schedule.every().day.at("09:06").do(send_post)
     schedule.every().day.at("14:00").do(send_post)
 
     # Polling thread

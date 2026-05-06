@@ -275,8 +275,12 @@ def handle_updates():
                 if chat_member:
                     old = chat_member.get("old_chat_member", {}).get("status", "")
                     new = chat_member.get("new_chat_member", {}).get("status", "")
-                    if old in ("left", "kicked") and new == "member":
+                    chat_type = chat_member.get("chat", {}).get("type", "")
+                    # Faqat guruhda ishlaydi, kanalda emas
+                    if old in ("left", "kicked") and new == "member" and chat_type in ("group", "supergroup"):
                         user = chat_member["new_chat_member"]["user"]
+                        if user.get("is_bot"):
+                            continue
                         name = f"@{user.get('username', '')}" if user.get("username") else user.get("first_name", "")
                         chat_id = chat_member["chat"]["id"]
                         welcome = (
@@ -412,3 +416,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

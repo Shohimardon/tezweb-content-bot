@@ -136,6 +136,24 @@ def generate_post(topic):
     else:
         vaqt = "kechqurun"
 
+    import random
+    post_formats = [
+        "yangilik",      # IT Uzbekiston yangiliklari
+        "maslahat",      # Biznes uchun amaliy maslahat
+        "fakt",          # Qiziqarli fakt yoki statistika
+        "keis",          # Muvaffaqiyatli keis tahlili
+        "savol",         # Auditoriyani jalb qiluvchi savol
+    ]
+    post_format = random.choice(post_formats)
+
+    format_instructions = {
+        "yangilik": "O'zbekiston IT sohasi yoki dunyo texnologiyalari bo'yicha so'nggi yangilik yoki trend haqida yoz. Yangilik formatida: sarlavha, qisqacha ma'lumot, TezWeb.uz bilan bog'liq xulosа.",
+        "maslahat": "Biznes uchun sayt yoki raqamli marketing bo'yicha 3-5 ta amaliy maslahat ber. Ro'yxat formatida yoz.",
+        "fakt": "To'g'ridan-to'g'ri qiziqarli fakt yoki statistika bilan boshlang. Bilasizmi deb boshlama.",
+        "keis": "O'zbekistondagi yoki MDH dagi biror biznesning raqamli transformatsiya muvaffaqiyati haqida qisqa keis yoz.",
+        "savol": "Auditoriyaga savol bilan boshlang, ularni o'ylantir, keyin TezWeb.uz yechimini taqdim et.",
+    }
+
     msg = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1000,
@@ -143,11 +161,12 @@ def generate_post(topic):
 TezWeb.uz — Uzbekistonda tez yuklanadigan saytlar, Telegram botlar va reklama xizmatlarini taqdim etuvchi IT kompaniya.
 
 Mavzu: {topic}
+Post formati: {format_instructions[post_format]}
 
 Talablar:
 - Til: O'zbek tili (lotin alifbosi)
 - Uzunlik: 150-200 so'z (MUHIM: 900 belgidan oshmasin!)
-- Qiziqarli fakt yoki savol bilan boshlang
+- Har xil formatda yoz — monoton bo'lmasin
 - Qisqa paragraflar, emojilar ishlatilsin
 - Oxirida TezWeb.uz ni tabiiy tarzda tavsiya qil
 - Eng oxirgi qator: "tezweb.uz | @tezweb_uz | @Shohdollar22"
